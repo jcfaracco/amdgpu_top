@@ -2,11 +2,8 @@ use std::fs;
 use std::io::Read;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
-use std::path::Path;
 use super::ProcInfo;
 use crate::stat;
-
-const KFD_PROC_PATH: &str = "/sys/class/kfd/kfd/proc/";
 
 // ref: drivers/gpu/drm/amd/amdgpu/amdgpu_fdinfo.c
 
@@ -182,6 +179,8 @@ impl FdInfoUsage {
     pub fn calc_usage(
         &self,
         pre_stat: &Self,
+        pre_cpu_time: f32,
+        cur_cpu_time: f32,
         interval: &Duration,
         has_vcn: bool,
         has_vcn_unified: bool,
@@ -220,8 +219,14 @@ impl FdInfoUsage {
             [dec, total_enc, media, 0]
         };
 
+        let cpu = {
+            let tmp = cur_cpu_time - pre_cpu_time;
+
+            (tmp * 100.0 / interval.as_secs_f32()).ceil() as i64
+        };
+
         Self {
-            cpu: 0,
+            cpu,
             vram_usage: self.vram_usage,
             gtt_usage: self.gtt_usage,
             system_cpu_memory_usage: self.system_cpu_memory_usage,
@@ -255,18 +260,17 @@ pub struct ProcUsage {
 
 #[derive(Clone, Default)]
 pub struct FdInfoStat {
-    pub pid_map: HashMap<i32, FdInfoUsage>,
+    pub pid_map: HashMap<i32, (FdInfoUsage, f32)>,
     pub drm_client_ids: HashSet<usize>,
     pub proc_usage: Vec<ProcUsage>,
     pub interval: Duration,
-    pub cpu_time_map: HashMap<i32, f32>, // sec
     pub has_vcn: bool,
     pub has_vcn_unified: bool,
     pub has_vpe: bool,
 }
 
 impl FdInfoStat {
-    pub fn get_cpu_usage(&mut self, pid: i32, name: &str) -> f32 {
+    fn get_cpu_time(&mut self, pid: i32, name: &str) -> f32 {
         const OFFSET: usize = 3;
         // ref: https://manpages.org/proc/5
         const UTIME: usize = 14 - OFFSET;
@@ -279,21 +283,11 @@ impl FdInfoStat {
             .map(|t| t.and_then(|tt| tt.parse::<f32>().ok()).unwrap_or(0.0));
 
         // ref: https://stackoverflow.com/questions/16726779/how-do-i-get-the-total-cpu-usage-of-an-application-from-proc-pid-stat
-        let total_time = (utime + stime) / HZ; // sec = (tick + tick) / HZ
-
-        if let Some(pre_cpu_time) = self.cpu_time_map.get_mut(&pid) {
-            let tmp = total_time - *pre_cpu_time;
-            *pre_cpu_time = total_time;
-
-            (tmp * 100.0 / self.interval.as_secs_f32()).ceil()
-        } else {
-            self.cpu_time_map.insert(pid, total_time);
-
-            0.0
-        }
+        // sec = (tick + tick) / HZ
+        (utime + stime) / HZ
     }
 
-    pub fn get_proc_usage(&mut self, proc_info: &ProcInfo) {
+    fn get_proc_usage(&mut self, proc_info: &ProcInfo) {
         let pid = proc_info.pid;
         let mut stat = FdInfoUsage::default();
         let mut buf = String::with_capacity(2048);
@@ -329,15 +323,21 @@ impl FdInfoStat {
             }
         }
 
-        let mut usage = if let Some(pre_stat) = self.pid_map.get_mut(&pid) {
+        let name = proc_info.name.clone();
+        let cur_cpu_time = self.get_cpu_time(pid, &name);
+
+        let usage = if let Some((pre_stat, pre_cpu_time)) = self.pid_map.get_mut(&pid) {
             // ns -> %
             let usage_per = stat.calc_usage(
                 pre_stat,
+                *pre_cpu_time,
+                cur_cpu_time,
                 &self.interval,
                 self.has_vcn,
                 self.has_vcn_unified,
             );
             *pre_stat = stat;
+            *pre_cpu_time = cur_cpu_time;
 
             usage_per
         } else {
@@ -357,7 +357,7 @@ impl FdInfoStat {
                 stat.amd_requested_gtt,
             ];
 
-            self.pid_map.insert(pid, stat);
+            self.pid_map.insert(pid, (stat, cur_cpu_time));
 
             FdInfoUsage {
                 vram_usage,
@@ -370,17 +370,12 @@ impl FdInfoStat {
             }
         };
 
-        let name = proc_info.name.clone();
-        let is_kfd_process = Path::new(KFD_PROC_PATH).join(pid.to_string()).exists();
-
-        usage.cpu = self.get_cpu_usage(pid, &name) as i64;
-
         self.proc_usage.push(ProcUsage {
             pid,
             name,
             ids_count,
             usage,
-            is_kfd_process,
+            is_kfd_process: proc_info.is_kfd_proc,
         });
     }
 

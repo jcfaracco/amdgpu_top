@@ -19,6 +19,7 @@ use libamdgpu_top::{
     },
     AppDeviceInfo,
     DevicePath,
+    GuiMode,
     GuiWgpuBackend,
     Sampling,
     UiArgs,
@@ -67,6 +68,15 @@ static SIDE_PANEL_ID: LazyLock<egui::Id> = LazyLock::new(|| {
 static PCI_BUS_ID: LazyLock<egui::Id> = LazyLock::new(|| {
     egui::Id::new("pci_bus")
 });
+static GUI_MODE_ID: LazyLock<egui::Id> = LazyLock::new(|| {
+    egui::Id::new("gui_mode")
+});
+static MAIN_TAB_ID: LazyLock<egui::Id> = LazyLock::new(|| {
+    egui::Id::new("main_tab")
+});
+static INFO_TAB_ID: LazyLock<egui::Id> = LazyLock::new(|| {
+    egui::Id::new("info_tab")
+});
 
 pub fn run(
     app_name: &str,
@@ -78,7 +88,7 @@ pub fn run(
         no_pc,
         is_dark_mode,
         gui_wgpu_backend,
-        tab_gui,
+        gui_mode,
         ..
     }: UiArgs,
 ) {
@@ -150,7 +160,7 @@ pub fn run(
         no_pc,
         pause: false,
         full_fdinfo_list: false,
-        tab_gui,
+        gui_mode,
         main_tab: Default::default(),
         info_tab: Default::default(),
     };
@@ -285,10 +295,12 @@ pub fn run(
                 let id = *PCI_BUS_ID;
                 let s: Option<String> = cc.egui_ctx.data_mut(|id_map| id_map.get_persisted(id));
 
-                if let Some(pci_bus) = s.and_then(|s| s.parse::<PCI::BUS_INFO>().ok())
-                    && gui_app.buf_vec_data.iter().any(|d| pci_bus == d.pci_bus) {
-                        gui_app.selected_pci_bus = pci_bus;
-                    }
+                if let Some(s) = s
+                    && let Ok(pci_bus) = s.parse::<PCI::BUS_INFO>()
+                    && gui_app.buf_vec_data.iter().any(|d| pci_bus == d.pci_bus)
+                {
+                    gui_app.selected_pci_bus = pci_bus;
+                }
             }
 
             if let Some(is_dark_mode) = is_dark_mode {
@@ -309,6 +321,42 @@ pub fn run(
 
                 if let Some(theme) = theme {
                     cc.egui_ctx.set_theme(theme);
+                }
+            }
+
+            if gui_mode == GuiMode::Auto {
+                let id = *GUI_MODE_ID;
+                let gui_mode_u8: Option<u8> = cc.egui_ctx.data_mut(|id_map| id_map.get_persisted(id));
+
+                if let Some(v) = gui_mode_u8 && let Ok(gui_mode) = GuiMode::try_from(v) {
+                    gui_app.gui_mode = gui_mode;
+                }
+            } else {
+                let gui_mode_u8: u8 = gui_mode.into();
+                cc.egui_ctx.data_mut(|id_map| {
+                    let v = id_map.get_persisted_mut_or_insert_with(
+                        *GUI_MODE_ID,
+                        || { gui_mode_u8 },
+                    );
+                    *v = gui_mode_u8;
+                });
+            }
+
+            {
+                let id = *MAIN_TAB_ID;
+                let main_tab_u8: Option<u8> = cc.egui_ctx.data_mut(|id_map| id_map.get_persisted(id));
+
+                if let Some(v) = main_tab_u8 && let Ok(main_tab) = tab_gui::MainTab::try_from(v) {
+                    gui_app.main_tab = main_tab;
+                }
+            }
+
+            {
+                let id = *INFO_TAB_ID;
+                let info_tab_u8: Option<u8> = cc.egui_ctx.data_mut(|id_map| id_map.get_persisted(id));
+
+                if let Some(v) = info_tab_u8 && let Ok(info_tab) = tab_gui::InfoTab::try_from(v) {
+                    gui_app.info_tab = info_tab;
                 }
             }
 
@@ -350,7 +398,7 @@ impl MyApp {
     }
 
     fn egui_side_panel(&self, ui: &mut egui::Ui) {
-        let scroll_area = if self.tab_gui {
+        let scroll_area = if self.gui_mode.is_tab_mode() {
             egui::ScrollArea::new([false, false])
         } else {
             egui::ScrollArea::vertical()
@@ -518,7 +566,7 @@ impl eframe::App for MyApp {
 
         {
             let mut style = (*ctx.style()).clone();
-            if self.tab_gui {
+            if self.gui_mode.is_tab_mode() {
                 style.override_font_id = Some(MEDIUM);
             } else {
                 style.override_font_id = Some(BASE);
@@ -549,7 +597,7 @@ impl eframe::App for MyApp {
                     ui.separator();
                 }
 
-                if !self.tab_gui {
+                if !self.gui_mode.is_tab_mode() {
                     let res =
                         ui.toggle_value(
                             &mut self.show_sidepanel,
@@ -572,7 +620,7 @@ impl eframe::App for MyApp {
                 {
                     let pre_theme = ctx.theme();
 
-                    if self.tab_gui {
+                    if self.gui_mode.is_tab_mode() {
                         egui::widgets::global_theme_preference_switch(ui);
                     } else {
                         egui::widgets::global_theme_preference_buttons(ui);
@@ -592,7 +640,7 @@ impl eframe::App for MyApp {
                     ui.separator();
                 }
 
-                if self.tab_gui {
+                if self.gui_mode.is_tab_mode() {
                     if ui.button("-").clicked() {
                         egui::gui_zoom::zoom_out(ctx);
                     }
@@ -612,15 +660,34 @@ impl eframe::App for MyApp {
                 );
 
                 ui.separator();
-                if !self.tab_gui {
-                    ui.toggle_value(&mut self.tab_gui, "Tab Mode");
-                } else {
-                    ui.toggle_value(&mut self.tab_gui, "Single");
+
+                {
+                    let pre_mode = self.gui_mode;
+
+                    if !self.gui_mode.is_tab_mode() {
+                        if ui.button("Tab Mode").clicked() {
+                            self.gui_mode = GuiMode::Tab;
+                        }
+                    } else if ui.button("Single").clicked() {
+                        self.gui_mode = GuiMode::Single;
+                    }
+
+                    if pre_mode != self.gui_mode {
+                        let gui_mode_u8: u8 = self.gui_mode.into();
+                        ctx.data_mut(|id_map| {
+                            let v = id_map.get_persisted_mut_or_insert_with(
+                                *GUI_MODE_ID,
+                                || { gui_mode_u8 },
+                            );
+                            *v = gui_mode_u8;
+                        });
+                    }
                 }
+
                 ui.separator();
             });
 
-            if !self.tab_gui { ui.horizontal(|ui| {
+            if !self.gui_mode.is_tab_mode() { ui.horizontal(|ui| {
                 egui::gui_zoom::zoom_menu_buttons(ui);
                 ui.label(format!("{:>3.0}%", ctx.zoom_factor() * 100.0));
                 ui.separator();
@@ -629,14 +696,39 @@ impl eframe::App for MyApp {
             }); }
         });
 
-        if !self.tab_gui && self.show_sidepanel {
+        if !self.gui_mode.is_tab_mode() && self.show_sidepanel {
             egui::SidePanel::left(*SIDE_PANEL_ID).show(ctx, |ui| self.egui_side_panel(ui));
         }
 
         egui::CentralPanel::default().show(
             ctx,
-            |ui| if self.tab_gui {
-                self.egui_tab_gui(ui)
+            |ui| if self.gui_mode.is_tab_mode() {
+                let pre_main_tab = self.main_tab;
+                let pre_info_tab = self.info_tab;
+
+                self.egui_tab_gui(ui);
+
+                if pre_main_tab != self.main_tab {
+                    let main_tab_u8: u8 = self.main_tab.into();
+                    ctx.data_mut(|id_map| {
+                        let v = id_map.get_persisted_mut_or_insert_with(
+                            *MAIN_TAB_ID,
+                            || { main_tab_u8 },
+                        );
+                        *v = main_tab_u8;
+                    });
+                }
+
+                if pre_info_tab != self.info_tab {
+                    let info_tab_u8: u8 = self.info_tab.into();
+                    ctx.data_mut(|id_map| {
+                        let v = id_map.get_persisted_mut_or_insert_with(
+                            *INFO_TAB_ID,
+                            || { info_tab_u8 },
+                        );
+                        *v = info_tab_u8;
+                    });
+                }
             } else {
                 self.egui_central_panel(ui)
             }
