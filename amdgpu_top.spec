@@ -1,5 +1,5 @@
 Name:           amdgpu_top
-Version:        0.11.0
+Version:        0.11.2
 Release:        1%{?dist}
 Summary:        Tool to displays AMDGPU usage and performance counters
 
@@ -7,7 +7,7 @@ Summary:        Tool to displays AMDGPU usage and performance counters
 
 License:        MIT
 URL:            https://github.com/Umio-Yasuno/amdgpu_top
-Source0:        %{name}-%{version}.tar.gz
+Source0:        https://github.com/Umio-Yasuno/amdgpu_top/archive/refs/tags/v%{version}.tar.gz
 
 ExclusiveArch:  x86_64 aarch64
 
@@ -75,6 +75,22 @@ fi
 %{_mandir}/man1/amdgpu_top.1*
 
 %changelog
+* Thu Feb 05 2026 Julio Faracco <jfaracco@redhat.com> - 0.11.2-1
+- fix gfx and media activity for Strix Point, Krackan Point and Strix Halo (#139)
+- improve to_d3hot check logic (#142)
+- improve cpu usage calculation
+- update kfd process detection logic
+- rename "Ring List Controller" to "RunList Controller" (#145)
+- apply input power workaround for SMU v13.0.5 to Granite Ridge only
+- [TUI] fix xdna fdinfo header
+- [TUI] print throttle_residency_* for gpu_metrics_v3_0
+- [GUI] print throttle_residency_* for gpu_metrics_v3_0
+- [GUI] use max_od_gpu_clk and max_od_mem_clk for Sensors plot
+- [GUI] persist GUI mode
+- [GUI] use GpuMetrics::get_throttle_status_info
+- [GUI] persist main tab and info tab
+- [GUI] use max_od_gpu_clk and max_od_mem_clk for Sensors plot (#145)
+
 * Tue Sep 02 2025 Julio Faracco <jfaracco@redhat.com> - 0.11.0-1
 - fix Appstream metainfo by @malfisya
 - fix the process to get gpu_metrics when resuming from suspended state
